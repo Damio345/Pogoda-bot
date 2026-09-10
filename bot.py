@@ -36,12 +36,6 @@ def save_users(data):
     except Exception as e:
         logging.error(f"Failed to save users: {e}")
 
-def clean_text(text):
-    """Удаляет спецсимволы Markdown, чтобы Telegram не выдавал ошибку"""
-    if not text:
-        return ""
-    return str(text).replace("_", "\\_").replace("*", "\\*").replace("`", "\\`").replace("[", "\\[")
-
 def get_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -52,7 +46,6 @@ def get_keyboard():
     ])
 
 async def fetch_weather(place_name, days=1):
-    # Кодируем название города для безопасной передачи в URL
     encoded_place = urllib.parse.quote(place_name)
     url = f"https://wttr.in/{encoded_place}?format=j1&lang=ru"
     
@@ -60,7 +53,7 @@ async def fetch_weather(place_name, days=1):
         async with ClientSession() as session:
             async with session.get(url, timeout=10) as resp:
                 if resp.status != 200:
-                    return f"⚠️ Не удалось найти погоду для '{clean_text(place_name)}'."
+                    return f"⚠️ Не удалось найти погоду для '{place_name}'."
                 data = await resp.json()
 
         curr = data.get("current_condition", [{}])[0]
@@ -69,7 +62,7 @@ async def fetch_weather(place_name, days=1):
         
         city = area.get("areaName", [{}])[0].get("value", place_name)
         country = area.get("country", [{}])[0].get("value", "")
-        display_name = clean_text(f"{city}, {country}")
+        display_name = f"{city}, {country}"
 
         if days == 1:
             today = weather_days[0] if weather_days else {}
@@ -77,20 +70,20 @@ async def fetch_weather(place_name, days=1):
             desc = curr.get("lang_ru", [{}])[0].get("value", curr.get("weatherDesc", [{}])[0].get("value", ""))
 
             return (
-                f"📍 **Место:** {display_name}\n"
+                f"📍 Место: {display_name}\n"
                 f"━━━━━━━━━━━━━━━━━━━\n"
-                f"🌡 **Температура:** {curr.get('temp_C')}°C (ощущается как {curr.get('FeelsLikeC')}°C)\n"
-                f"📊 **Мин / Макс сегодня:** {today.get('mintempC')}°C ... {today.get('maxtempC')}°C\n"
-                f"☁️ **Состояние:** {clean_text(desc)}\n"
-                f"💧 **Влажность:** {curr.get('humidity')}%\n"
-                f"💨 **Ветер:** {curr.get('windspeedKmph')} км/ч\n"
-                f"⏲ **Давление:** {round(float(curr.get('pressure', 0)) * 0.750063)} мм рт. ст.\n"
-                f"☀️ **УФ-Индекс:** {curr.get('uvIndex')}\n"
+                f"🌡 Температура: {curr.get('temp_C')}°C (ощущается как {curr.get('FeelsLikeC')}°C)\n"
+                f"📊 Мин / Макс сегодня: {today.get('mintempC')}°C ... {today.get('maxtempC')}°C\n"
+                f"☁️ Состояние: {desc}\n"
+                f"💧 Влажность: {curr.get('humidity')}%\n"
+                f"💨 Ветер: {curr.get('windspeedKmph')} км/ч\n"
+                f"⏲ Давление: {round(float(curr.get('pressure', 0)) * 0.750063)} мм рт. ст.\n"
+                f"☀️ УФ-Индекс: {curr.get('uvIndex')}\n"
                 f"━━━━━━━━━━━━━━━━━━━\n"
-                f"🌅 **Восход:** {astronomy.get('sunrise', '--:--')} | 🌇 **Закат:** {astronomy.get('sunset', '--:--')}"
+                f"🌅 Восход: {astronomy.get('sunrise', '--:--')} | 🌇 Закат: {astronomy.get('sunset', '--:--')}"
             )
 
-        text = f"📍 **Прогноз на {days} дн. ({display_name}):**\n"
+        text = f"📍 Прогноз на {days} дн. ({display_name}):\n"
         for day_data in weather_days[:days]:
             date_str = day_data.get("date")
             astronomy = day_data.get("astronomy", [{}])[0] if day_data.get("astronomy") else {}
@@ -99,11 +92,11 @@ async def fetch_weather(place_name, days=1):
 
             text += (
                 f"━━━━━━━━━━━━━━━━━━━\n"
-                f"📅 **Дата:** {date_str}\n"
-                f"☁️ **Состояние:** {clean_text(noon_desc)}\n"
-                f"🌡 **Температура:** от {day_data.get('mintempC')}°C до {day_data.get('maxtempC')}°C\n"
-                f"☀️ **УФ-индекс:** {day_data.get('uvIndex')}\n"
-                f"🌅 **Восход:** {astronomy.get('sunrise', '--:--')} | 🌇 **Закат:** {astronomy.get('sunset', '--:--')}\n"
+                f"📅 Дата: {date_str}\n"
+                f"☁️ Состояние: {noon_desc}\n"
+                f"🌡 Температура: от {day_data.get('mintempC')}°C до {day_data.get('maxtempC')}°C\n"
+                f"☀️ УФ-индекс: {day_data.get('uvIndex')}\n"
+                f"🌅 Восход: {astronomy.get('sunrise', '--:--')} | 🌇 Закат: {astronomy.get('sunset', '--:--')}\n"
             )
         return text
 
@@ -121,8 +114,7 @@ async def send_daily_weather():
                     report = await fetch_weather(place_name, days=1)
                     await bot.send_message(
                         chat_id=int(user_id),
-                        text=f"☀️ **Ежедневный утренний отчет!**\n\n{report}",
-                        parse_mode="Markdown",
+                        text=f"☀️ Ежедневный утренний отчет!\n\n{report}",
                         reply_markup=get_keyboard()
                     )
                 except Exception as e:
@@ -140,7 +132,7 @@ async def search_place(message: Message):
     save_users(users)
 
     report = await fetch_weather(place_name, days=1)
-    await message.answer(f"✅ Локация сохранена!\n\n{report}", parse_mode="Markdown", reply_markup=get_keyboard())
+    await message.answer(f"✅ Локация сохранена!\n\n{report}", reply_markup=get_keyboard())
 
 @dp.callback_query(lambda c: c.data and c.data.startswith('period_'))
 async def process_period_choice(callback: CallbackQuery):
@@ -153,7 +145,7 @@ async def process_period_choice(callback: CallbackQuery):
         if user_id in users:
             place_name = users[user_id]['place']
             report = await fetch_weather(place_name, days=days)
-            await callback.message.edit_text(report, parse_mode="Markdown", reply_markup=get_keyboard())
+            await callback.message.edit_text(report, reply_markup=get_keyboard())
         else:
             await callback.message.answer("Сначала напишите название города или деревни!")
     except Exception as e:
