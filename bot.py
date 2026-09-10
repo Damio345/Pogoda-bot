@@ -60,76 +60,84 @@ def get_keyboard():
     ])
 
 async def fetch_weather(session: aiohttp.ClientSession, lat, lon, display_name, days=1):
-    w_url = (
-        f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}"
-        f"&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,surface_pressure,wind_speed_10m,wind_direction_10m"
-        f"&daily=weather_code,temperature_2m_max,temperature_2m_min,apparent_temperature_max,apparent_temperature_min,"
-        f"sunrise,sunset,uv_index_max,precipitation_sum,wind_speed_10m_max,wind_direction_10m_dominant"
-        f"&timezone=auto"
-    )
-    async with session.get(w_url) as resp:
-        w_res = await resp.json()
-
-    if 'daily' not in w_res or 'current' not in w_res:
-        return "⚠️ Не удалось получить данные о погоде для указанной локации."
-
-    daily = w_res['daily']
-    
-    if days == 1:
-        curr = w_res['current']
-        condition = WEATHER_CODES.get(curr.get('weather_code', 0), "Неизвестно")
-        wind_dir = get_wind_direction(curr.get('wind_direction_10m', 0))
-        pressure_mmHg = round(curr.get('surface_pressure', 0) * 0.750063)
+    try:
+        lat_f = float(lat)
+        lon_f = float(lon)
         
-        sunrise = daily['sunrise'][0].split('T')[1] if 'sunrise' in daily and daily['sunrise'] else "--:--"
-        sunset = daily['sunset'][0].split('T')[1] if 'sunset' in daily and daily['sunset'] else "--:--"
-
-        return (
-            f"📍 **Место:** {display_name}\n"
-            f"━━━━━━━━━━━━━━━━━━━\n"
-            f"🌡 **Температура:** {round(curr.get('temperature_2m', 0))}°C (ощущается как {round(curr.get('apparent_temperature', 0))}°C)\n"
-            f"📊 **Мин / Макс сегодня:** {round(daily['temperature_2m_min'][0])}°C ... {round(daily['temperature_2m_max'][0])}°C\n"
-            f"☁️ **Состояние:** {condition}\n"
-            f"💧 **Влажность:** {curr.get('relative_humidity_2m', 0)}%\n"
-            f"💨 **Ветер:** {round(curr.get('wind_speed_10m', 0))} км/ч ({wind_dir})\n"
-            f"⏲ **Давление:** {pressure_mmHg} мм рт. ст.\n"
-            f"☀️ **УФ-Индекс:** {daily['uv_index_max'][0]}\n"
-            f"🌧 **Осадки:** {daily['precipitation_sum'][0]} мм\n"
-            f"━━━━━━━━━━━━━━━━━━━\n"
-            f"🌅 **Восход:** {sunrise} | 🌇 **Закат:** {sunset}"
+        w_url = (
+            f"https://api.open-meteo.com/v1/forecast?latitude={lat_f}&longitude={lon_f}"
+            f"&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,surface_pressure,wind_speed_10m,wind_direction_10m"
+            f"&daily=weather_code,temperature_2m_max,temperature_2m_min,apparent_temperature_max,apparent_temperature_min,"
+            f"sunrise,sunset,uv_index_max,precipitation_sum,wind_speed_10m_max,wind_direction_10m_dominant"
+            f"&timezone=auto"
         )
-    
-    text = f"📍 **Подробный прогноз ({display_name}):**\n"
-    for i in range(min(days, len(daily.get('time', [])))):
-        date_obj = datetime.strptime(daily['time'][i], "%Y-%m-%d")
-        day_name = DAYS_TRANSLATE.get(date_obj.strftime("%A"), "")
-        date_str = date_obj.strftime("%d.%m")
-        
-        cond = WEATHER_CODES.get(daily['weather_code'][i], "Неизвестно")
-        t_min = round(daily['temperature_2m_min'][i])
-        t_max = round(daily['temperature_2m_max'][i])
-        app_min = round(daily['apparent_temperature_min'][i])
-        app_max = round(daily['apparent_temperature_max'][i])
-        
-        wind_speed = round(daily['wind_speed_10m_max'][i])
-        wind_dir = get_wind_direction(daily['wind_direction_10m_dominant'][i])
-        precip = daily['precipitation_sum'][i]
-        uv = daily['uv_index_max'][i]
-        sunrise = daily['sunrise'][i].split('T')[1] if 'sunrise' in daily else "--:--"
-        sunset = daily['sunset'][i].split('T')[1] if 'sunset' in daily else "--:--"
+        async with session.get(w_url) as resp:
+            w_res = await resp.json()
 
-        text += (
-            f"━━━━━━━━━━━━━━━━━━━\n"
-            f"📅 **{day_name} ({date_str})**\n"
-            f"☁️ **Состояние:** {cond}\n"
-            f"🌡 **Температура:** от {t_min}°C до {t_max}°C\n"
-            f"🤔 **Ощущается как:** от {app_min}°C до {app_max}°C\n"
-            f"💨 **Ветер макс.:** {wind_speed} км/ч ({wind_dir})\n"
-            f"🌧 **Осадки:** {precip} мм\n"
-            f"☀️ **УФ-индекс:** {uv}\n"
-            f"🌅 **Восход:** {sunrise} | 🌇 **Закат:** {sunset}\n"
-        )
-    return text
+        if 'daily' not in w_res or 'current' not in w_res:
+            logging.error(f"Open-Meteo error: {w_res}")
+            return "⚠️ Не удалось получить данные о погоде для указанной локации."
+
+        daily = w_res['daily']
+        
+        if days == 1:
+            curr = w_res['current']
+            condition = WEATHER_CODES.get(curr.get('weather_code', 0), "Неизвестно")
+            wind_dir = get_wind_direction(curr.get('wind_direction_10m', 0))
+            pressure_mmHg = round(curr.get('surface_pressure', 0) * 0.750063)
+            
+            sunrise = daily['sunrise'][0].split('T')[1] if 'sunrise' in daily and daily['sunrise'] else "--:--"
+            sunset = daily['sunset'][0].split('T')[1] if 'sunset' in daily and daily['sunset'] else "--:--"
+
+            return (
+                f"📍 **Место:** {display_name}\n"
+                f"━━━━━━━━━━━━━━━━━━━\n"
+                f"🌡 **Температура:** {round(curr.get('temperature_2m', 0))}°C (ощущается как {round(curr.get('apparent_temperature', 0))}°C)\n"
+                f"📊 **Мин / Макс сегодня:** {round(daily['temperature_2m_min'][0])}°C ... {round(daily['temperature_2m_max'][0])}°C\n"
+                f"☁️ **Состояние:** {condition}\n"
+                f"💧 **Влажность:** {curr.get('relative_humidity_2m', 0)}%\n"
+                f"💨 **Ветер:** {round(curr.get('wind_speed_10m', 0))} км/ч ({wind_dir})\n"
+                f"⏲ **Давление:** {pressure_mmHg} мм рт. ст.\n"
+                f"☀️ **УФ-Индекс:** {daily['uv_index_max'][0]}\n"
+                f"🌧 **Осадки:** {daily['precipitation_sum'][0]} мм\n"
+                f"━━━━━━━━━━━━━━━━━━━\n"
+                f"🌅 **Восход:** {sunrise} | 🌇 **Закат:** {sunset}"
+            )
+        
+        text = f"📍 **Подробный прогноз ({display_name}):**\n"
+        for i in range(min(days, len(daily.get('time', [])))):
+            date_obj = datetime.strptime(daily['time'][i], "%Y-%m-%d")
+            day_name = DAYS_TRANSLATE.get(date_obj.strftime("%A"), "")
+            date_str = date_obj.strftime("%d.%m")
+            
+            cond = WEATHER_CODES.get(daily['weather_code'][i], "Неизвестно")
+            t_min = round(daily['temperature_2m_min'][i])
+            t_max = round(daily['temperature_2m_max'][i])
+            app_min = round(daily['apparent_temperature_min'][i])
+            app_max = round(daily['apparent_temperature_max'][i])
+            
+            wind_speed = round(daily['wind_speed_10m_max'][i])
+            wind_dir = get_wind_direction(daily['wind_direction_10m_dominant'][i])
+            precip = daily['precipitation_sum'][i]
+            uv = daily['uv_index_max'][i]
+            sunrise = daily['sunrise'][i].split('T')[1] if 'sunrise' in daily else "--:--"
+            sunset = daily['sunset'][i].split('T')[1] if 'sunset' in daily else "--:--"
+
+            text += (
+                f"━━━━━━━━━━━━━━━━━━━\n"
+                f"📅 **{day_name} ({date_str})**\n"
+                f"☁️ **Состояние:** {cond}\n"
+                f"🌡 **Температура:** от {t_min}°C до {t_max}°C\n"
+                f"🤔 **Ощущается как:** от {app_min}°C до {app_max}°C\n"
+                f"💨 **Ветер макс.:** {wind_speed} км/ч ({wind_dir})\n"
+                f"🌧 **Осадки:** {precip} мм\n"
+                f"☀️ **УФ-индекс:** {uv}\n"
+                f"🌅 **Восход:** {sunrise} | 🌇 **Закат:** {sunset}\n"
+            )
+        return text
+    except Exception as e:
+        logging.error(f"Fetch weather error: {e}")
+        return "⚠️ Ошибка при запросе погоды."
 
 async def morning_scheduler(session: aiohttp.ClientSession):
     while True:
@@ -147,7 +155,7 @@ async def morning_scheduler(session: aiohttp.ClientSession):
                             reply_markup=get_keyboard()
                         )
                     except Exception as e:
-                        logging.error(f"Failed to send morning weather to {user_id}: {e}")
+                        logging.error(f"Morning scheduler error: {e}")
             await asyncio.sleep(60)
         await asyncio.sleep(30)
 
@@ -230,7 +238,7 @@ async def process_place_choice(callback: CallbackQuery, session: aiohttp.ClientS
         await callback.message.edit_text(f"✅ Локация сохранена!\n\n{report}", parse_mode="Markdown", reply_markup=get_keyboard())
     except Exception as e:
         logging.error(f"Callback place error: {e}")
-        await callback.answer("Произошла ошибка при сохранении локации.", show_alert=True)
+        await callback.answer("Ошибка при сохранении.", show_alert=True)
     finally:
         await callback.answer()
 
