@@ -6,10 +6,7 @@ from datetime import datetime
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from aiohttp import web
-import openmeteo_requests
-import requests_cache
-from retry_requests import retry
+from aiohttp import web, ClientSession
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
@@ -17,10 +14,6 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 USERS_FILE = "user_settings.json"
-
-cache_session = requests_cache.CachedSession('.cache', expire_after=3600)
-retry_session = retry(cache_session, retries=5, backoff_factor=0.2)
-openmeteo = openmeteo_requests.Client(session=retry_session)
 
 WEATHER_CODES = {
     0: "Ясно ☀️", 1: "Преимущественно ясно 🌤", 2: "Переменная облачность ⛅️", 3: "Пасмурно ☁️",
@@ -40,7 +33,8 @@ def load_users():
         try:
             with open(USERS_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except Exception:
+        except Exception as e:
+            logging.error(f"Error reading JSON: {e}")
             return {}
     return {}
 
@@ -52,9 +46,12 @@ def save_users(data):
         logging.error(f"Failed to save users: {e}")
 
 def get_wind_direction(deg):
-    dirs = ['Северный ⬆️', 'Северо-восточный ↗️', 'Восточный ➡️', 'Юго-восточный ↘️',
-            'Южный ⬇️', 'Юго-западный ↙️', 'Западный ⬅️', 'Северо-западный ↖️']
-    return dirs[int((float(deg) + 22.5) / 45) % 8]
+    try:
+        dirs = ['Северный ⬆️', 'Северо-восточный ↗️', 'Восточный ➡️', 'Юго-восточный ↘️',
+                'Южный ⬇️', 'Юго-западный ↙️', 'Западный ⬅️', 'Северо-западный ↖️']
+        return dirs[int((float(deg) + 22.5) / 45) % 8]
+    except Exception:
+        return "Неизвестно 🌀"
 
 def get_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -65,116 +62,111 @@ def get_keyboard():
         ]
     ])
 
-def fetch_weather_sync(lat, lon, display_name, days=1):
+async def fetch_weather(lat, lon, display_name, days=1):
+    url = "https://api.open-meteo.com/v1/forecast"
+    params = {
+        "latitude": str(lat),
+        "longitude": str(lon),
+        "current": "temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,surface_pressure,wind_speed_10m,wind_direction_10m",
+        "daily": "weather_code,temperature_2m_max,temperature_2m_min,apparent_temperature_max,apparent_temperature_min,sunrise,sunset,uv_index_max,precipitation_sum,wind_speed_10m_max,wind_direction_10m_dominant",
+        "timezone": "auto"
+    }
+    
     try:
-        url = "https://api.open-meteo.com/v1/forecast"
-        params = {
-            "latitude": float(lat),
-            "longitude": float(lon),
-            "current": ["temperature_2m", "relative_humidity_2m", "apparent_temperature", "weather_code", "surface_pressure", "wind_speed_10m", "wind_direction_10m"],
-            "daily": ["weather_code", "temperature_2m_max", "temperature_2m_min", "apparent_temperature_max", "apparent_temperature_min", "sunrise", "sunset", "uv_index_max", "precipitation_sum", "wind_speed_10m_max", "wind_direction_10m_dominant"],
-            "timezone": "auto"
-        }
-        responses = openmeteo.weather_api(url, params=params)
-        response = responses[0]
+        async with ClientSession() as session:
+            async with session.get(url, params=params, timeout=10) as resp:
+                if resp.status != 200:
+                    return "⚠️ Ошибка сервера погоды. Попробуйте позже."
+                data = await resp.json()
 
-        current = response.Current()
-        daily = response.Daily()
-
-        curr_temp = current.Variables(0).Value()
-        curr_humidity = current.Variables(1).Value()
-        curr_apparent = current.Variables(2).Value()
-        curr_code = int(current.Variables(3).Value())
-        curr_pressure = round(current.Variables(4).Value() * 0.750063)
-        curr_wind_speed = current.Variables(5).Value()
-        curr_wind_dir = current.Variables(6).Value()
-
-        daily_code = daily.Variables(0).ValuesAsNparray()
-        daily_max = daily.Variables(1).ValuesAsNparray()
-        daily_min = daily.Variables(2).ValuesAsNparray()
-        daily_app_max = daily.Variables(3).ValuesAsNparray()
-        daily_app_min = daily.Variables(4).ValuesAsNparray()
-        daily_sunrise = daily.Variables(5).ValuesAsNparray()
-        daily_sunset = daily.Variables(6).ValuesAsNparray()
-        daily_uv = daily.Variables(7).ValuesAsNparray()
-        daily_precip = daily.Variables(8).ValuesAsNparray()
-        daily_wind_max = daily.Variables(9).ValuesAsNparray()
-        daily_wind_dir = daily.Variables(10).ValuesAsNparray()
+        curr = data.get("current", {})
+        daily = data.get("daily", {})
 
         if days == 1:
-            condition = WEATHER_CODES.get(curr_code, "Неизвестно")
-            wind_dir = get_wind_direction(curr_wind_dir)
+            cond = WEATHER_CODES.get(curr.get("weather_code", 0), "Неизвестно")
+            wind_dir = get_wind_direction(curr.get("wind_direction_10m", 0))
             
-            sunrise = datetime.fromtimestamp(daily_sunrise[0]).strftime("%H:%M") if len(daily_sunrise) > 0 else "--:--"
-            sunset = datetime.fromtimestamp(daily_sunset[0]).strftime("%H:%M") if len(daily_sunset) > 0 else "--:--"
+            sunrise_raw = daily.get("sunrise", [""])[0]
+            sunset_raw = daily.get("sunset", [""])[0]
+            sunrise = sunrise_raw.split("T")[1] if "T" in sunrise_raw else "--:--"
+            sunset = sunset_raw.split("T")[1] if "T" in sunset_raw else "--:--"
+
+            press = round(curr.get("surface_pressure", 0) * 0.750063)
 
             return (
                 f"📍 **Место:** {display_name}\n"
                 f"━━━━━━━━━━━━━━━━━━━\n"
-                f"🌡 **Температура:** {round(curr_temp)}°C (ощущается как {round(curr_apparent)}°C)\n"
-                f"📊 **Мин / Макс сегодня:** {round(daily_min[0])}°C ... {round(daily_max[0])}°C\n"
-                f"☁️ **Состояние:** {condition}\n"
-                f"💧 **Влажность:** {round(curr_humidity)}%\n"
-                f"💨 **Ветер:** {round(curr_wind_speed)} км/ч ({wind_dir})\n"
-                f"⏲ **Давление:** {curr_pressure} мм рт. ст.\n"
-                f"☀️ **УФ-Индекс:** {round(daily_uv[0], 1)}\n"
-                f"🌧 **Осадки:** {round(daily_precip[0], 1)} мм\n"
+                f"🌡 **Температура:** {round(curr.get('temperature_2m', 0))}°C (ощущается как {round(curr.get('apparent_temperature', 0))}°C)\n"
+                f"📊 **Мин / Макс сегодня:** {round(daily.get('temperature_2m_min', [0])[0])}°C ... {round(daily.get('temperature_2m_max', [0])[0])}°C\n"
+                f"☁️ **Состояние:** {cond}\n"
+                f"💧 **Влажность:** {round(curr.get('relative_humidity_2m', 0))}%\n"
+                f"💨 **Ветер:** {round(curr.get('wind_speed_10m', 0))} км/ч ({wind_dir})\n"
+                f"⏲ **Давление:** {press} мм рт. ст.\n"
+                f"☀️ **УФ-Индекс:** {round(daily.get('uv_index_max', [0])[0], 1)}\n"
+                f"🌧 **Осадки:** {round(daily.get('precipitation_sum', [0])[0], 1)} мм\n"
                 f"━━━━━━━━━━━━━━━━━━━\n"
                 f"🌅 **Восход:** {sunrise} | 🌇 **Закат:** {sunset}"
             )
 
         text = f"📍 **Подробный прогноз ({display_name}):**\n"
-        for i in range(min(days, len(daily_code))):
-            date_obj = datetime.fromtimestamp(daily.Time() + i * 86400)
-            day_name = DAYS_TRANSLATE.get(date_obj.strftime("%A"), "")
-            date_str = date_obj.strftime("%d.%m")
+        times = daily.get("time", [])
+        for i in range(min(days, len(times))):
+            date_str = times[i]
+            try:
+                date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+                day_name = DAYS_TRANSLATE.get(date_obj.strftime("%A"), "")
+                formatted_date = date_obj.strftime("%d.%m")
+            except Exception:
+                day_name = ""
+                formatted_date = date_str
 
-            cond = WEATHER_CODES.get(int(daily_code[i]), "Неизвестно")
-            t_min = round(daily_min[i])
-            t_max = round(daily_max[i])
-            app_min = round(daily_app_min[i])
-            app_max = round(daily_app_max[i])
+            cond = WEATHER_CODES.get(daily.get("weather_code", [])[i], "Неизвестно")
+            t_min = round(daily.get("temperature_2m_min", [])[i])
+            t_max = round(daily.get("temperature_2m_max", [])[i])
+            app_min = round(daily.get("apparent_temperature_min", [])[i])
+            app_max = round(daily.get("apparent_temperature_max", [])[i])
 
-            wind_speed = round(daily_wind_max[i])
-            wind_dir = get_wind_direction(daily_wind_dir[i])
-            precip = round(daily_precip[i], 1)
-            uv = round(daily_uv[i], 1)
-            sunrise = datetime.fromtimestamp(daily_sunrise[i]).strftime("%H:%M")
-            sunset = datetime.fromtimestamp(daily_sunset[i]).strftime("%H:%M")
+            wind_speed = round(daily.get("wind_speed_10m_max", [])[i])
+            wind_dir = get_wind_direction(daily.get("wind_direction_10m_dominant", [])[i])
+            precip = round(daily.get("precipitation_sum", [])[i], 1)
+            uv = round(daily.get("uv_index_max", [])[i], 1)
+
+            sr = daily.get("sunrise", [])[i].split("T")[1] if "T" in daily.get("sunrise", [])[i] else "--:--"
+            ss = daily.get("sunset", [])[i].split("T")[1] if "T" in daily.get("sunset", [])[i] else "--:--"
 
             text += (
                 f"━━━━━━━━━━━━━━━━━━━\n"
-                f"📅 **{day_name} ({date_str})**\n"
+                f"📅 **{day_name} ({formatted_date})**\n"
                 f"☁️ **Состояние:** {cond}\n"
                 f"🌡 **Температура:** от {t_min}°C до {t_max}°C\n"
                 f"🤔 **Ощущается как:** от {app_min}°C до {app_max}°C\n"
                 f"💨 **Ветер макс.:** {wind_speed} км/ч ({wind_dir})\n"
                 f"🌧 **Осадки:** {precip} мм\n"
                 f"☀️ **УФ-индекс:** {uv}\n"
-                f"🌅 **Восход:** {sunrise} | 🌇 **Закат:** {sunset}\n"
+                f"🌅 **Восход:** {sr} | 🌇 **Закат:** {ss}\n"
             )
         return text
+
     except Exception as e:
         logging.error(f"Fetch weather error: {e}")
-        return "⚠️ Ошибка при запросе погоды."
-
-async def fetch_weather(lat, lon, display_name, days=1):
-    return await asyncio.to_thread(fetch_weather_sync, lat, lon, display_name, days)
+        return "⚠️ Произошла ошибка при получении погоды."
 
 @dp.message(CommandStart())
 async def start_cmd(message: Message):
-    await message.answer("👋 Напиши название населенного пункта.\nЯ запомню его и буду присылать полные отчеты по дням!")
+    await message.answer("👋 Напиши название населенного пункта.\nЯ запомню его и буду присылать полные отчеты!")
 
 @dp.message()
 async def search_place(message: Message):
     place_name = message.text.strip()
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    headers = {"User-Agent": "WeatherAppBot/2.0"}
     geo_url = f"https://nominatim.openstreetmap.org/search?q={place_name}&format=json&addressdetails=1&limit=3"
 
     try:
-        import aiohttp
-        async with aiohttp.ClientSession() as session:
-            async with session.get(geo_url, headers=headers) as resp:
+        async with ClientSession() as session:
+            async with session.get(geo_url, headers=headers, timeout=10) as resp:
+                if resp.status != 200:
+                    await message.answer("⚠️ Поиск мест временно недоступен.")
+                    return
                 geo_res = await resp.json()
 
         if not geo_res:
@@ -207,7 +199,7 @@ async def search_place(message: Message):
 
     except Exception as e:
         logging.error(f"Search place error: {e}")
-        await message.answer("⚠️ Ошибка поиска.")
+        await message.answer("⚠️ Ошибка при поиске города.")
 
 @dp.callback_query(lambda c: c.data and c.data.startswith('geo:'))
 async def process_place_choice(callback: CallbackQuery):
@@ -216,14 +208,13 @@ async def process_place_choice(callback: CallbackQuery):
         lat, lon = float(parts[1]), float(parts[2])
         user_id = str(callback.from_user.id)
 
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        headers = {"User-Agent": "WeatherAppBot/2.0"}
         rev_url = f"https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lon}&format=json"
 
         display_name = f"Локация ({lat}, {lon})"
         try:
-            import aiohttp
-            async with aiohttp.ClientSession() as session:
-                async with session.get(rev_url, headers=headers) as resp:
+            async with ClientSession() as session:
+                async with session.get(rev_url, headers=headers, timeout=10) as resp:
                     if resp.status == 200:
                         rev_res = await resp.json()
                         display_name = rev_res.get('display_name', display_name)
@@ -280,4 +271,3 @@ async def main():
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     asyncio.run(main())
-
