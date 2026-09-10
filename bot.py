@@ -74,7 +74,7 @@ async def fetch_weather(lat, lon, display_name, days=1):
         "timezone": "auto"
     }
     
-    headers = {"User-Agent": "WeatherAppBot/2.0 (contact@example.com)"}
+    headers = {"User-Agent": "WeatherAppBot/2.0 (mybot@domain.com)"}
     
     try:
         async with ClientSession() as session:
@@ -162,41 +162,45 @@ async def start_cmd(message: Message):
 @dp.message()
 async def search_place(message: Message):
     place_name = message.text.strip()
-    headers = {"User-Agent": "WeatherAppBot/2.0 (contact@example.com)"}
-    geo_url = f"https://nominatim.openstreetmap.org/search?q={place_name}&format=json&addressdetails=1&limit=3"
+    geo_url = f"https://geocoding-api.open-meteo.com/v1/search?name={place_name}&count=5&language=ru&format=json"
 
     try:
         async with ClientSession() as session:
-            async with session.get(geo_url, headers=headers, timeout=10) as resp:
+            async with session.get(geo_url, timeout=10) as resp:
                 if resp.status != 200:
-                    await message.answer("⚠️ Поиск мест временно недоступен.")
+                    await message.answer("⚠️ Ошибка сервиса поиска мест.")
                     return
-                geo_res = await resp.json()
+                geo_data = await resp.json()
 
-        if not geo_res:
+        results = geo_data.get("results", [])
+
+        if not results:
             await message.answer("❌ Ничего не найдено. Попробуй уточнить название.")
             return
 
-        if len(geo_res) == 1:
-            p = geo_res[0]
+        if len(results) == 1:
+            p = results[0]
+            display_name = f"{p.get('name')}, {p.get('country', '')}"
             users = load_users()
             users[str(message.from_user.id)] = {
-                "lat": float(p['lat']), "lon": float(p['lon']),
-                "name": p['display_name'], "subscribed": True
+                "lat": float(p['latitude']), "lon": float(p['longitude']),
+                "name": display_name, "subscribed": True
             }
             save_users(users)
 
-            report = await fetch_weather(p['lat'], p['lon'], p['display_name'], days=1)
+            report = await fetch_weather(p['latitude'], p['longitude'], display_name, days=1)
             await message.answer(f"✅ Локация сохранена!\n\n{report}", parse_mode="Markdown", reply_markup=get_keyboard())
             return
 
         buttons = []
-        for item in geo_res:
-            short_title = item['display_name'][:35] + "..."
-            lat = round(float(item['lat']), 4)
-            lon = round(float(item['lon']), 4)
+        for item in results:
+            country = item.get('country', '')
+            admin1 = item.get('admin1', '')
+            title = f"{item.get('name')} ({admin1}, {country})".strip(" (,)")[:35]
+            lat = round(float(item['latitude']), 4)
+            lon = round(float(item['longitude']), 4)
             cb_data = f"geo:{lat}:{lon}"
-            buttons.append([InlineKeyboardButton(text=short_title, callback_data=cb_data)])
+            buttons.append([InlineKeyboardButton(text=title, callback_data=cb_data)])
 
         kb = InlineKeyboardMarkup(inline_keyboard=buttons)
         await message.answer("🔎 Выбери точное место (я его запомню):", reply_markup=kb)
@@ -212,19 +216,7 @@ async def process_place_choice(callback: CallbackQuery):
         lat, lon = float(parts[1]), float(parts[2])
         user_id = str(callback.from_user.id)
 
-        headers = {"User-Agent": "WeatherAppBot/2.0 (contact@example.com)"}
-        rev_url = f"https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lon}&format=json"
-
         display_name = f"Локация ({lat}, {lon})"
-        try:
-            async with ClientSession() as session:
-                async with session.get(rev_url, headers=headers, timeout=10) as resp:
-                    if resp.status == 200:
-                        rev_res = await resp.json()
-                        display_name = rev_res.get('display_name', display_name)
-        except Exception as e:
-            logging.error(f"Reverse geocoding error: {e}")
-
         users = load_users()
         users[user_id] = {
             "lat": lat, "lon": lon,
@@ -264,7 +256,6 @@ async def handle(request):
 async def main():
     logging.basicConfig(level=logging.INFO)
 
-    # Веб-сервер для прохождения проверки портов Render
     app = web.Application()
     app.router.add_get("/", handle)
     runner = web.AppRunner(app)
