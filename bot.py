@@ -6,7 +6,7 @@ from datetime import datetime
 from aiogram import Bot, Dispatcher
 from aiogram.filters import CommandStart
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from aiohttp import ClientSession
+from aiohttp import ClientSession, web
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
@@ -258,8 +258,22 @@ async def process_period_choice(callback: CallbackQuery):
     finally:
         await callback.answer()
 
+async def handle(request):
+    return web.Response(text="Bot is running!")
+
 async def main():
     logging.basicConfig(level=logging.INFO)
+
+    # Веб-сервер для прохождения проверки портов Render
+    app = web.Application()
+    app.router.add_get("/", handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    
+    port = int(os.getenv("PORT", 10000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
