@@ -229,4 +229,24 @@ async def main():
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     asyncio.run(main())
+from aiohttp import web
+
+async def handle(request):
+    return web.Response(text="Bot is alive!")
+
+async def main():
+    async with aiohttp.ClientSession() as session:
+        dp["session"] = session
+        asyncio.create_task(morning_scheduler(session))
+        
+        # Поднимаем легкий веб-сервер для Render
+        app = web.Application()
+        app.router.add_get("/", handle)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        port = int(os.getenv("PORT", 8080))
+        site = web.TCPSite(runner, "0.0.0.0", port)
+        await site.start()
+        
+        await dp.start_polling(bot)
 
