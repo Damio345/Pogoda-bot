@@ -3,7 +3,6 @@ import logging
 import json
 import os
 import urllib.parse
-from datetime import datetime
 from aiogram import Bot, Dispatcher
 from aiogram.filters import CommandStart
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
@@ -19,6 +18,7 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 USERS_FILE = "user_settings.json"
+TEMP_PLACES = {}  # Временное хранение вариантов поиска для обхода лимита 64 байт Telegram
 
 def load_users():
     if os.path.exists(USERS_FILE):
@@ -36,7 +36,7 @@ def save_users(data):
     except Exception as e:
         logging.error(f"Failed to save users: {e}")
 
-def get_keyboard():
+def get_period_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="Сегодня 📅", callback_data="period_1"),
@@ -45,25 +45,60 @@ def get_keyboard():
         ]
     ])
 
-async def fetch_weather(place_name, days=1):
-    encoded_place = urllib.parse.quote(place_name)
-    url = f"https://wttr.in/{encoded_place}?format=j1&lang=ru"
+async def search_places(query):
+    """Ищет варианты населенных пунктов через Open-Meteo Geocoding"""
+    encoded = urllib.parse.quote(query)
+    url = f"https://geocoding-api.open-meteo.com/v1/search?name={encoded}&count=5&language=ru&format=json"
+    
+    try:
+        async with ClientSession() as session:
+            async with session.get(url, timeout=10) as resp:
+                if resp.status == 200:
+                    data = await resp.json(content_type=None)
+                    results = data.get("results", [])
+                    places = []
+                    for idx, item in enumerate(results):
+                        name = item.get("name", "")
+                        admin = item.get("admin1", "")
+                        country = item.get("country", "")
+                        
+                        full_name = name
+                        if admin and admin != name:
+                            full_name += f", {admin}"
+                        if country:
+                            full_name += f" ({country})"
+                            
+                        lat, lon = item.get("latitude"), item.get("longitude")
+                        places.append({"id": str(idx), "name": full_name, "query": f"{lat},{lon}"})
+                    return places
+    except Exception as e:
+        logging.error(f"Geocoding error: {e}")
+    return []
+
+async def fetch_weather(query, days=1):
+    encoded = urllib.parse.quote(query)
+    url = f"https://wttr.in/{encoded}?format=j1&lang=ru"
     
     try:
         async with ClientSession() as session:
             async with session.get(url, timeout=10) as resp:
                 if resp.status != 200:
-                    return f"⚠️ Не удалось найти погоду для '{place_name}'."
-                # ИСПРАВЛЕНИЕ: content_type=None отключает строгую проверку типа заголовка
+                    return f"⚠️ Не удалось найти погоду."
                 data = await resp.json(content_type=None)
 
         curr = data.get("current_condition", [{}])[0]
         weather_days = data.get("weather", [])
         area = data.get("nearest_area", [{}])[0]
         
-        city = area.get("areaName", [{}])[0].get("value", place_name)
+        city = area.get("areaName", [{}])[0].get("value", query)
+        region = area.get("region", [{}])[0].get("value", "")
         country = area.get("country", [{}])[0].get("value", "")
-        display_name = f"{city}, {country}"
+        
+        display_name = city
+        if region and region != city:
+            display_name += f", {region}"
+        if country:
+            display_name += f" ({country})"
 
         if days == 1:
             today = weather_days[0] if weather_days else {}
@@ -109,31 +144,73 @@ async def send_daily_weather():
     users = load_users()
     for user_id, user_info in users.items():
         if user_info.get("subscribed"):
-            place_name = user_info.get("place")
-            if place_name:
+            place_query = user_info.get("place")
+            if place_query:
                 try:
-                    report = await fetch_weather(place_name, days=1)
+                    report = await fetch_weather(place_query, days=1)
                     await bot.send_message(
                         chat_id=int(user_id),
                         text=f"☀️ Ежедневный утренний отчет!\n\n{report}",
-                        reply_markup=get_keyboard()
+                        reply_markup=get_period_keyboard()
                     )
                 except Exception as e:
                     logging.error(f"Failed send daily weather to {user_id}: {e}")
 
 @dp.message(CommandStart())
 async def start_cmd(message: Message):
-    await message.answer("👋 Напиши название населенного пункта.\nЯ запомню его и буду присылать полные отчеты каждую утреннюю рассылку!")
+    await message.answer("👋 Напиши название населенного пункта, и я помогу выбрать точный вариант!")
 
 @dp.message()
-async def search_place(message: Message):
-    place_name = message.text.strip()
-    users = load_users()
-    users[str(message.from_user.id)] = {"place": place_name, "subscribed": True}
-    save_users(users)
+async def search_place_handler(message: Message):
+    user_id = str(message.from_user.id)
+    query = message.text.strip()
+    places = await search_places(query)
 
-    report = await fetch_weather(place_name, days=1)
-    await message.answer(f"✅ Локация сохранена!\n\n{report}", reply_markup=get_keyboard())
+    if not places:
+        users = load_users()
+        users[user_id] = {"place": query, "subscribed": True}
+        save_users(users)
+        report = await fetch_weather(query, days=1)
+        await message.answer(f"✅ Локация сохранена!\n\n{report}", reply_markup=get_period_keyboard())
+        return
+
+    if len(places) == 1:
+        p = places[0]
+        users = load_users()
+        users[user_id] = {"place": p["query"], "subscribed": True}
+        save_users(users)
+        report = await fetch_weather(p["query"], days=1)
+        await message.answer(f"✅ Сохранено: {p['name']}\n\n{report}", reply_markup=get_period_keyboard())
+    else:
+        # Сохраняем варианты в словаре TEMP_PLACES для пользователя
+        TEMP_PLACES[user_id] = {p["id"]: p for p in places}
+        buttons = []
+        for p in places:
+            cb_data = f"loc|{p['id']}"
+            buttons.append([InlineKeyboardButton(text=p['name'], callback_data=cb_data)])
+            
+        kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+        await message.answer("🔍 Найдено несколько вариантов. Выберите ваш населенный пункт:", reply_markup=kb)
+
+@dp.callback_query(lambda c: c.data and c.data.startswith('loc|'))
+async def process_select_location(callback: CallbackQuery):
+    await callback.answer("Сохраняем...")
+    user_id = str(callback.from_user.id)
+    place_id = callback.data.split('|')[1]
+    
+    user_temp = TEMP_PLACES.get(user_id, {})
+    selected_place = user_temp.get(place_id)
+
+    if selected_place:
+        loc_query = selected_place["query"]
+        users = load_users()
+        users[user_id] = {"place": loc_query, "subscribed": True}
+        save_users(users)
+
+        report = await fetch_weather(loc_query, days=1)
+        await callback.message.edit_text(f"✅ Сохранено: {selected_place['name']}\n\n{report}", reply_markup=get_period_keyboard())
+    else:
+        await callback.message.answer("Сессия выбора истекла. Напишите название города еще раз!")
 
 @dp.callback_query(lambda c: c.data and c.data.startswith('period_'))
 async def process_period_choice(callback: CallbackQuery):
@@ -144,11 +221,11 @@ async def process_period_choice(callback: CallbackQuery):
         users = load_users()
 
         if user_id in users:
-            place_name = users[user_id]['place']
-            report = await fetch_weather(place_name, days=days)
-            await callback.message.edit_text(report, reply_markup=get_keyboard())
+            place_query = users[user_id]['place']
+            report = await fetch_weather(place_query, days=days)
+            await callback.message.edit_text(report, reply_markup=get_period_keyboard())
         else:
-            await callback.message.answer("Сначала напишите название города или деревни!")
+            await callback.message.answer("Сначала напишите название города!")
     except Exception as e:
         logging.error(f"Period choice error: {e}")
 
