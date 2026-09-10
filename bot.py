@@ -54,7 +54,8 @@ async def fetch_weather(place_name, days=1):
             async with session.get(url, timeout=10) as resp:
                 if resp.status != 200:
                     return f"⚠️ Не удалось найти погоду для '{place_name}'."
-                data = await resp.json()
+                # ИСПРАВЛЕНИЕ: content_type=None отключает строгую проверку типа заголовка
+                data = await resp.json(content_type=None)
 
         curr = data.get("current_condition", [{}])[0]
         weather_days = data.get("weather", [])
