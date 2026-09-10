@@ -7,15 +7,14 @@ from datetime import datetime
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiohttp import web
 
-# Токен берется из переменных окружения Render (Environment Variables)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 USERS_FILE = "user_settings.json"
-USER_CHOICES = {}
 
 WEATHER_CODES = {
     0: "Ясно ☀️", 1: "Преимущественно ясно 🌤", 2: "Переменная облачность ⛅️", 3: "Пасмурно ☁️",
@@ -32,8 +31,11 @@ DAYS_TRANSLATE = {
 
 def load_users():
     if os.path.exists(USERS_FILE):
-        with open(USERS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            with open(USERS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
     return {}
 
 def save_users(data):
@@ -176,11 +178,14 @@ async def search_place(message: Message, session: aiohttp.ClientSession):
             await message.answer(f"✅ Локация сохранена!\n\n{report}", parse_mode="Markdown", reply_markup=get_keyboard())
             return
 
-        USER_CHOICES[message.from_user.id] = geo_res
         buttons = []
-        for idx, item in enumerate(geo_res):
-            short_title = item['display_name'][:40] + "..."
-            buttons.append([InlineKeyboardButton(text=short_title, callback_data=f"place_{idx}")])
+        for item in geo_res:
+            short_title = item['display_name'][:35] + "..."
+            lat = round(float(item['lat']), 4)
+            lon = round(float(item['lon']), 4)
+            # Зашиваем координаты прямо в callback_data
+            cb_data = f"geo:{lat}:{lon}"
+            buttons.append([InlineKeyboardButton(text=short_title, callback_data=cb_data)])
         
         kb = InlineKeyboardMarkup(inline_keyboard=buttons)
         await message.answer("🔎 Выбери точное место (я его запомню):", reply_markup=kb)
@@ -188,24 +193,31 @@ async def search_place(message: Message, session: aiohttp.ClientSession):
     except Exception:
         await message.answer("⚠️ Ошибка поиска.")
 
-@dp.callback_query(lambda c: c.data.startswith('place_'))
+@dp.callback_query(lambda c: c.data.startswith('geo:'))
 async def process_place_choice(callback: CallbackQuery, session: aiohttp.ClientSession):
-    idx = int(callback.data.split('_')[1])
-    user_id = callback.from_user.id
+    _, lat, lon = callback.data.split(':')
+    user_id = str(callback.from_user.id)
     
-    if user_id in USER_CHOICES and idx < len(USER_CHOICES[user_id]):
-        p = USER_CHOICES[user_id][idx]
-        users = load_users()
-        users[str(user_id)] = {
-            "lat": p['lat'], "lon": p['lon'], 
-            "name": p['display_name'], "subscribed": True
-        }
-        save_users(users)
+    headers = {"User-Agent": "TelegramWeatherBot/1.0"}
+    rev_url = f"https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lon}&format=json"
+    
+    try:
+        async with session.get(rev_url, headers=headers) as resp:
+            rev_res = await resp.json()
+        display_name = rev_res.get('display_name', 'Выбранная локация')
+    except Exception:
+        display_name = 'Выбранная локация'
 
-        report = await fetch_weather(session, p['lat'], p['lon'], p['display_name'], days=1)
-        await callback.message.edit_text(f"✅ Локация сохранена!\n\n{report}", parse_mode="Markdown", reply_markup=get_keyboard())
-    else:
-        await callback.answer("Запрос устарел, введите место заново.")
+    users = load_users()
+    users[user_id] = {
+        "lat": lat, "lon": lon, 
+        "name": display_name, "subscribed": True
+    }
+    save_users(users)
+
+    report = await fetch_weather(session, lat, lon, display_name, days=1)
+    await callback.message.edit_text(f"✅ Локация сохранена!\n\n{report}", parse_mode="Markdown", reply_markup=get_keyboard())
+    await callback.answer()
 
 @dp.callback_query(lambda c: c.data.startswith('period_'))
 async def process_period_choice(callback: CallbackQuery, session: aiohttp.ClientSession):
@@ -219,27 +231,16 @@ async def process_period_choice(callback: CallbackQuery, session: aiohttp.Client
         await callback.message.edit_text(report, parse_mode="Markdown", reply_markup=get_keyboard())
     else:
         await callback.answer("Сначала напишите название вашей деревни или города!")
-
-async def main():
-    async with aiohttp.ClientSession() as session:
-        dp["session"] = session
-        asyncio.create_task(morning_scheduler(session))
-        await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    asyncio.run(main())
-from aiohttp import web
+    await callback.answer()
 
 async def handle(request):
-    return web.Response(text="Bot is alive!")
+    return web.Response(text="Bot is running!")
 
 async def main():
     async with aiohttp.ClientSession() as session:
         dp["session"] = session
         asyncio.create_task(morning_scheduler(session))
         
-        # Поднимаем легкий веб-сервер для Render
         app = web.Application()
         app.router.add_get("/", handle)
         runner = web.AppRunner(app)
@@ -249,4 +250,8 @@ async def main():
         await site.start()
         
         await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    asyncio.run(main())
 
