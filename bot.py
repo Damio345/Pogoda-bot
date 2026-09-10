@@ -7,9 +7,9 @@ from aiogram import Bot, Dispatcher
 from aiogram.filters import CommandStart
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiohttp import ClientSession, web
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEATHER_KEY = os.getenv("WEATHER_KEY")
 
 if not BOT_TOKEN:
     raise ValueError("ОШИБКА: Переменная BOT_TOKEN не найдена в окружении!")
@@ -18,11 +18,6 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 USERS_FILE = "user_settings.json"
-
-DAYS_TRANSLATE = {
-    'Monday': 'Понедельник', 'Tuesday': 'Вторник', 'Wednesday': 'Среда',
-    'Thursday': 'Четверг', 'Friday': 'Пятница', 'Saturday': 'Суббота', 'Sunday': 'Воскресенье'
-}
 
 def load_users():
     if os.path.exists(USERS_FILE):
@@ -49,73 +44,57 @@ def get_keyboard():
         ]
     ])
 
-async def fetch_weather(query, days=1):
-    if not WEATHER_KEY:
-        return "⚠️ Не задан WEATHER_KEY в настройках Render!"
-        
-    url = "https://api.weatherapi.com/v1/forecast.json"
-    params = {
-        "key": WEATHER_KEY,
-        "q": query,
-        "days": days,
-        "lang": "ru"
-    }
+async def fetch_weather(place_name, days=1):
+    url = f"https://wttr.in/{place_name}?format=j1&lang=ru"
     
     try:
         async with ClientSession() as session:
-            async with session.get(url, params=params, timeout=10) as resp:
+            async with session.get(url, timeout=10) as resp:
                 if resp.status != 200:
-                    return f"⚠️ Ошибка сервера погоды (Код: {resp.status})."
+                    return f"⚠️ Не удалось найти погоду для '{place_name}'."
                 data = await resp.json()
 
-        loc = data.get("location", {})
-        curr = data.get("current", {})
-        forecast = data.get("forecast", {}).get("forecastday", [])
-
-        display_name = f"{loc.get('name')}, {loc.get('region', '')} ({loc.get('country')})"
+        curr = data.get("current_condition", [{}])[0]
+        weather_days = data.get("weather", [])
+        area = data.get("nearest_area", [{}])[0]
+        
+        city = area.get("areaName", [{}])[0].get("value", place_name)
+        country = area.get("country", [{}])[0].get("value", "")
+        display_name = f"{city}, {country}"
 
         if days == 1:
-            today_f = forecast[0]['day'] if forecast else {}
-            astro = forecast[0]['astro'] if forecast else {}
+            today = weather_days[0] if weather_days else {}
+            astronomy = today.get("astronomy", [{}])[0] if today.get("astronomy") else {}
+            desc = curr.get("lang_ru", [{}])[0].get("value", curr.get("weatherDesc", [{}])[0].get("value", ""))
 
             return (
                 f"📍 **Место:** {display_name}\n"
                 f"━━━━━━━━━━━━━━━━━━━\n"
-                f"🌡 **Температура:** {round(curr.get('temp_c', 0))}°C (ощущается как {round(curr.get('feelslike_c', 0))}°C)\n"
-                f"📊 **Мин / Макс сегодня:** {round(today_f.get('mintemp_c', 0))}°C ... {round(today_f.get('maxtemp_c', 0))}°C\n"
-                f"☁️ **Состояние:** {curr.get('condition', {}).get('text', '')}\n"
-                f"💧 **Влажность:** {curr.get('humidity', 0)}%\n"
-                f"💨 **Ветер:** {round(curr.get('wind_kph', 0))} км/ч\n"
-                f"⏲ **Давление:** {round(curr.get('pressure_mb', 0) * 0.750063)} мм рт. ст.\n"
-                f"☀️ **УФ-Индекс:** {curr.get('uv', 0)}\n"
-                f"🌧 **Осадки:** {today_f.get('totalprecip_mm', 0)} мм\n"
+                f"🌡 **Температура:** {curr.get('temp_C')}°C (ощущается как {curr.get('FeelsLikeC')}°C)\n"
+                f"📊 **Мин / Макс сегодня:** {today.get('mintempC')}°C ... {today.get('maxtempC')}°C\n"
+                f"☁️ **Состояние:** {desc}\n"
+                f"💧 **Влажность:** {curr.get('humidity')}%\n"
+                f"💨 **Ветер:** {curr.get('windspeedKmph')} км/ч\n"
+                f"⏲ **Давление:** {round(float(curr.get('pressure', 0)) * 0.750063)} мм рт. ст.\n"
+                f"☀️ **УФ-Индекс:** {curr.get('uvIndex')}\n"
                 f"━━━━━━━━━━━━━━━━━━━\n"
-                f"🌅 **Восход:** {astro.get('sunrise', '--:--')} | 🌇 **Закат:** {astro.get('sunset', '--:--')}"
+                f"🌅 **Восход:** {astronomy.get('sunrise', '--:--')} | 🌇 **Закат:** {astronomy.get('sunset', '--:--')}"
             )
 
-        text = f"📍 **Подробный прогноз ({display_name}):**\n"
-        for day_data in forecast:
+        text = f"📍 **Прогноз на {days} дн. ({display_name}):**\n"
+        for day_data in weather_days[:days]:
             date_str = day_data.get("date")
-            try:
-                date_obj = datetime.strptime(date_str, "%Y-%m-%d")
-                day_name = DAYS_TRANSLATE.get(date_obj.strftime("%A"), "")
-                formatted_date = date_obj.strftime("%d.%m")
-            except Exception:
-                day_name = ""
-                formatted_date = date_str
-
-            day = day_data.get("day", {})
-            astro = day_data.get("astro", {})
+            astronomy = day_data.get("astronomy", [{}])[0] if day_data.get("astronomy") else {}
+            hourly = day_data.get("hourly", [])
+            noon_desc = hourly[4].get("lang_ru", [{}])[0].get("value", "") if len(hourly) > 4 else ""
 
             text += (
                 f"━━━━━━━━━━━━━━━━━━━\n"
-                f"📅 **{day_name} ({formatted_date})**\n"
-                f"☁️ **Состояние:** {day.get('condition', {}).get('text', '')}\n"
-                f"🌡 **Температура:** от {round(day.get('mintemp_c', 0))}°C до {round(day.get('maxtemp_c', 0))}°C\n"
-                f"💨 **Ветер макс.:** {round(day.get('maxwind_kph', 0))} км/ч\n"
-                f"🌧 **Осадки:** {day.get('totalprecip_mm', 0)} мм\n"
-                f"☀️ **УФ-индекс:** {day.get('uv', 0)}\n"
-                f"🌅 **Восход:** {astro.get('sunrise', '--:--')} | 🌇 **Закат:** {astro.get('sunset', '--:--')}\n"
+                f"📅 **Дата:** {date_str}\n"
+                f"☁️ **Состояние:** {noon_desc}\n"
+                f"🌡 **Температура:** от {day_data.get('mintempC')}°C до {day_data.get('maxtempC')}°C\n"
+                f"☀️ **УФ-индекс:** {day_data.get('uvIndex')}\n"
+                f"🌅 **Восход:** {astronomy.get('sunrise', '--:--')} | 🌇 **Закат:** {astronomy.get('sunset', '--:--')}\n"
             )
         return text
 
@@ -123,86 +102,51 @@ async def fetch_weather(query, days=1):
         logging.error(f"Fetch weather error: {e}")
         return "⚠️ Ошибка при получении погоды."
 
+async def send_daily_weather():
+    users = load_users()
+    for user_id, user_info in users.items():
+        if user_info.get("subscribed"):
+            place_name = user_info.get("place")
+            if place_name:
+                try:
+                    report = await fetch_weather(place_name, days=1)
+                    await bot.send_message(
+                        chat_id=int(user_id),
+                        text=f"☀️ **Ежедневный утренний отчет!**\n\n{report}",
+                        parse_mode="Markdown",
+                        reply_markup=get_keyboard()
+                    )
+                except Exception as e:
+                    logging.error(f"Failed send daily weather to {user_id}: {e}")
+
 @dp.message(CommandStart())
 async def start_cmd(message: Message):
-    await message.answer("👋 Напиши название населенного пункта.\nЯ запомню его и буду присылать полные отчеты!")
+    await message.answer("👋 Напиши название населенного пункта.\nЯ запомню его и буду присылать полные отчеты каждую утреннюю рассылку!")
 
 @dp.message()
 async def search_place(message: Message):
     place_name = message.text.strip()
-    if not WEATHER_KEY:
-        await message.answer("⚠️ Не настроен WEATHER_KEY!")
-        return
+    users = load_users()
+    users[str(message.from_user.id)] = {"place": place_name, "subscribed": True}
+    save_users(users)
 
-    geo_url = f"https://api.weatherapi.com/v1/search.json?key={WEATHER_KEY}&q={place_name}"
-
-    try:
-        async with ClientSession() as session:
-            async with session.get(geo_url, timeout=10) as resp:
-                if resp.status != 200:
-                    await message.answer("⚠️ Ошибка поиска локаций.")
-                    return
-                results = await resp.json()
-
-        if not results:
-            await message.answer("❌ Ничего не найдено. Попробуй уточнить название.")
-            return
-
-        if len(results) == 1:
-            p = results[0]
-            query = f"{p['lat']},{p['lon']}"
-            users = load_users()
-            users[str(message.from_user.id)] = {"query": query, "subscribed": True}
-            save_users(users)
-
-            report = await fetch_weather(query, days=1)
-            await message.answer(f"✅ Локация сохранена!\n\n{report}", parse_mode="Markdown", reply_markup=get_keyboard())
-            return
-
-        buttons = []
-        for item in results[:5]:
-            title = f"{item.get('name')} ({item.get('region')}, {item.get('country')})"[:35]
-            cb_data = f"geo:{item['lat']}:{item['lon']}"
-            buttons.append([InlineKeyboardButton(text=title, callback_data=cb_data)])
-
-        kb = InlineKeyboardMarkup(inline_keyboard=buttons)
-        await message.answer("🔎 Выбери точное место (я его запомню):", reply_markup=kb)
-
-    except Exception as e:
-        logging.error(f"Search place error: {e}")
-        await message.answer("⚠️ Ошибка при поиске города.")
-
-@dp.callback_query(lambda c: c.data and c.data.startswith('geo:'))
-async def process_place_choice(callback: CallbackQuery):
-    await callback.answer("Загрузка...") # Мгновенное гашение загрузки на кнопке
-    try:
-        parts = callback.data.split(':')
-        query = f"{parts[1]},{parts[2]}"
-        user_id = str(callback.from_user.id)
-
-        users = load_users()
-        users[user_id] = {"query": query, "subscribed": True}
-        save_users(users)
-
-        report = await fetch_weather(query, days=1)
-        await callback.message.edit_text(f"✅ Локация сохранена!\n\n{report}", parse_mode="Markdown", reply_markup=get_keyboard())
-    except Exception as e:
-        logging.error(f"Callback place error: {e}")
+    report = await fetch_weather(place_name, days=1)
+    await message.answer(f"✅ Локация сохранена!\n\n{report}", parse_mode="Markdown", reply_markup=get_keyboard())
 
 @dp.callback_query(lambda c: c.data and c.data.startswith('period_'))
 async def process_period_choice(callback: CallbackQuery):
-    await callback.answer("Обновляю...") # Мгновенное гашение загрузки на кнопке
+    await callback.answer("Загрузка...")
     try:
         days = int(callback.data.split('_')[1])
         user_id = str(callback.from_user.id)
         users = load_users()
 
         if user_id in users:
-            query = users[user_id]['query']
-            report = await fetch_weather(query, days=days)
+            place_name = users[user_id]['place']
+            report = await fetch_weather(place_name, days=days)
             await callback.message.edit_text(report, parse_mode="Markdown", reply_markup=get_keyboard())
         else:
-            await callback.message.answer("Сначала напишите название вашей деревни или города!")
+            await callback.message.answer("Сначала напишите название города или деревни!")
     except Exception as e:
         logging.error(f"Period choice error: {e}")
 
@@ -211,6 +155,11 @@ async def handle(request):
 
 async def main():
     logging.basicConfig(level=logging.INFO)
+
+    # Настройка расписания рассылки на 09:00 по Екатеринбургу (Asia/Yekaterinburg, UTC+5)
+    scheduler = AsyncIOScheduler(timezone="Asia/Yekaterinburg")
+    scheduler.add_job(send_daily_weather, 'cron', hour=9, minute=0)
+    scheduler.start()
 
     app = web.Application()
     app.router.add_get("/", handle)
