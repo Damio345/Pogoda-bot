@@ -71,11 +71,12 @@ async def fetch_weather(session: aiohttp.ClientSession, lat, lon, display_name, 
             f"sunrise,sunset,uv_index_max,precipitation_sum,wind_speed_10m_max,wind_direction_10m_dominant"
             f"&timezone=auto"
         )
-        async with session.get(w_url) as resp:
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        async with session.get(w_url, headers=headers) as resp:
             w_res = await resp.json()
 
         if 'daily' not in w_res or 'current' not in w_res:
-            logging.error(f"Open-Meteo error: {w_res}")
+            logging.error(f"Open-Meteo response error: {w_res}")
             return "⚠️ Не удалось получить данные о погоде для указанной локации."
 
         daily = w_res['daily']
@@ -169,7 +170,7 @@ async def start_cmd(message: Message):
 @dp.message()
 async def search_place(message: Message, session: aiohttp.ClientSession):
     place_name = message.text.strip()
-    headers = {"User-Agent": "TelegramWeatherBot/1.0"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     geo_url = f"https://nominatim.openstreetmap.org/search?q={place_name}&format=json&addressdetails=1&limit=3"
     
     try:
@@ -215,7 +216,7 @@ async def process_place_choice(callback: CallbackQuery, session: aiohttp.ClientS
         lat, lon = parts[1], parts[2]
         user_id = str(callback.from_user.id)
         
-        headers = {"User-Agent": "TelegramWeatherBot/1.0"}
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
         rev_url = f"https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lon}&format=json"
         
         display_name = f"Локация ({lat}, {lon})"
