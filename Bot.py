@@ -8,7 +8,8 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 
-BOT_TOKEN = "8664971863:AAHo6182ZPEvo0lBqUo3Fv4q82ctAYFezmI"
+# Токен берется из переменных окружения Render (Environment Variables)
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -221,7 +222,6 @@ async def process_period_choice(callback: CallbackQuery, session: aiohttp.Client
 
 async def main():
     async with aiohttp.ClientSession() as session:
-        # Передаем общую сессию во все обработчики
         dp["session"] = session
         asyncio.create_task(morning_scheduler(session))
         await dp.start_polling(bot)
@@ -229,3 +229,4 @@ async def main():
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     asyncio.run(main())
+
