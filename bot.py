@@ -3,12 +3,15 @@ import logging
 import json
 import os
 from datetime import datetime
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher
 from aiogram.filters import CommandStart
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from aiohttp import web, ClientSession
+from aiohttp import ClientSession
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+if not BOT_TOKEN:
+    raise ValueError("ОШИБКА: Переменная BOT_TOKEN не найдена в окружении!")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -33,8 +36,7 @@ def load_users():
         try:
             with open(USERS_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except Exception as e:
-            logging.error(f"Error reading JSON: {e}")
+        except Exception:
             return {}
     return {}
 
@@ -72,11 +74,13 @@ async def fetch_weather(lat, lon, display_name, days=1):
         "timezone": "auto"
     }
     
+    headers = {"User-Agent": "WeatherAppBot/2.0 (contact@example.com)"}
+    
     try:
         async with ClientSession() as session:
-            async with session.get(url, params=params, timeout=10) as resp:
+            async with session.get(url, params=params, headers=headers, timeout=10) as resp:
                 if resp.status != 200:
-                    return "⚠️ Ошибка сервера погоды. Попробуйте позже."
+                    return f"⚠️ Ошибка сервера погоды (Код: {resp.status})."
                 data = await resp.json()
 
         curr = data.get("current", {})
@@ -86,8 +90,8 @@ async def fetch_weather(lat, lon, display_name, days=1):
             cond = WEATHER_CODES.get(curr.get("weather_code", 0), "Неизвестно")
             wind_dir = get_wind_direction(curr.get("wind_direction_10m", 0))
             
-            sunrise_raw = daily.get("sunrise", [""])[0]
-            sunset_raw = daily.get("sunset", [""])[0]
+            sunrise_raw = daily.get("sunrise", [""])[0] if daily.get("sunrise") else ""
+            sunset_raw = daily.get("sunset", [""])[0] if daily.get("sunset") else ""
             sunrise = sunrise_raw.split("T")[1] if "T" in sunrise_raw else "--:--"
             sunset = sunset_raw.split("T")[1] if "T" in sunset_raw else "--:--"
 
@@ -149,7 +153,7 @@ async def fetch_weather(lat, lon, display_name, days=1):
 
     except Exception as e:
         logging.error(f"Fetch weather error: {e}")
-        return "⚠️ Произошла ошибка при получении погоды."
+        return "⚠️ Ошибка при получении погоды."
 
 @dp.message(CommandStart())
 async def start_cmd(message: Message):
@@ -158,7 +162,7 @@ async def start_cmd(message: Message):
 @dp.message()
 async def search_place(message: Message):
     place_name = message.text.strip()
-    headers = {"User-Agent": "WeatherAppBot/2.0"}
+    headers = {"User-Agent": "WeatherAppBot/2.0 (contact@example.com)"}
     geo_url = f"https://nominatim.openstreetmap.org/search?q={place_name}&format=json&addressdetails=1&limit=3"
 
     try:
@@ -208,7 +212,7 @@ async def process_place_choice(callback: CallbackQuery):
         lat, lon = float(parts[1]), float(parts[2])
         user_id = str(callback.from_user.id)
 
-        headers = {"User-Agent": "WeatherAppBot/2.0"}
+        headers = {"User-Agent": "WeatherAppBot/2.0 (contact@example.com)"}
         rev_url = f"https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lon}&format=json"
 
         display_name = f"Локация ({lat}, {lon})"
@@ -254,20 +258,9 @@ async def process_period_choice(callback: CallbackQuery):
     finally:
         await callback.answer()
 
-async def handle(request):
-    return web.Response(text="Bot is running!")
-
 async def main():
-    app = web.Application()
-    app.router.add_get("/", handle)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    port = int(os.getenv("PORT", 8080))
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-
+    logging.basicConfig(level=logging.INFO)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
     asyncio.run(main())
