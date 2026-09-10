@@ -39,8 +39,11 @@ def load_users():
     return {}
 
 def save_users(data):
-    with open(USERS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    try:
+        with open(USERS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logging.error(f"Failed to save users: {e}")
 
 def get_wind_direction(deg):
     dirs = ['Северный ⬆️', 'Северо-восточный ↗️', 'Восточный ➡️', 'Юго-восточный ↘️',
@@ -67,24 +70,28 @@ async def fetch_weather(session: aiohttp.ClientSession, lat, lon, display_name, 
     async with session.get(w_url) as resp:
         w_res = await resp.json()
 
+    if 'daily' not in w_res or 'current' not in w_res:
+        return "⚠️ Не удалось получить данные о погоде для указанной локации."
+
     daily = w_res['daily']
     
     if days == 1:
         curr = w_res['current']
-        condition = WEATHER_CODES.get(curr['weather_code'], "Неизвестно")
-        wind_dir = get_wind_direction(curr['wind_direction_10m'])
-        pressure_mmHg = round(curr['surface_pressure'] * 0.750063)
-        sunrise = daily['sunrise'][0].split('T')[1]
-        sunset = daily['sunset'][0].split('T')[1]
+        condition = WEATHER_CODES.get(curr.get('weather_code', 0), "Неизвестно")
+        wind_dir = get_wind_direction(curr.get('wind_direction_10m', 0))
+        pressure_mmHg = round(curr.get('surface_pressure', 0) * 0.750063)
+        
+        sunrise = daily['sunrise'][0].split('T')[1] if 'sunrise' in daily and daily['sunrise'] else "--:--"
+        sunset = daily['sunset'][0].split('T')[1] if 'sunset' in daily and daily['sunset'] else "--:--"
 
         return (
             f"📍 **Место:** {display_name}\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
-            f"🌡 **Температура:** {round(curr['temperature_2m'])}°C (ощущается как {round(curr['apparent_temperature'])}°C)\n"
+            f"🌡 **Температура:** {round(curr.get('temperature_2m', 0))}°C (ощущается как {round(curr.get('apparent_temperature', 0))}°C)\n"
             f"📊 **Мин / Макс сегодня:** {round(daily['temperature_2m_min'][0])}°C ... {round(daily['temperature_2m_max'][0])}°C\n"
             f"☁️ **Состояние:** {condition}\n"
-            f"💧 **Влажность:** {curr['relative_humidity_2m']}%\n"
-            f"💨 **Ветер:** {round(curr['wind_speed_10m'])} км/ч ({wind_dir})\n"
+            f"💧 **Влажность:** {curr.get('relative_humidity_2m', 0)}%\n"
+            f"💨 **Ветер:** {round(curr.get('wind_speed_10m', 0))} км/ч ({wind_dir})\n"
             f"⏲ **Давление:** {pressure_mmHg} мм рт. ст.\n"
             f"☀️ **УФ-Индекс:** {daily['uv_index_max'][0]}\n"
             f"🌧 **Осадки:** {daily['precipitation_sum'][0]} мм\n"
@@ -93,7 +100,7 @@ async def fetch_weather(session: aiohttp.ClientSession, lat, lon, display_name, 
         )
     
     text = f"📍 **Подробный прогноз ({display_name}):**\n"
-    for i in range(days):
+    for i in range(min(days, len(daily.get('time', [])))):
         date_obj = datetime.strptime(daily['time'][i], "%Y-%m-%d")
         day_name = DAYS_TRANSLATE.get(date_obj.strftime("%A"), "")
         date_str = date_obj.strftime("%d.%m")
@@ -108,8 +115,8 @@ async def fetch_weather(session: aiohttp.ClientSession, lat, lon, display_name, 
         wind_dir = get_wind_direction(daily['wind_direction_10m_dominant'][i])
         precip = daily['precipitation_sum'][i]
         uv = daily['uv_index_max'][i]
-        sunrise = daily['sunrise'][i].split('T')[1]
-        sunset = daily['sunset'][i].split('T')[1]
+        sunrise = daily['sunrise'][i].split('T')[1] if 'sunrise' in daily else "--:--"
+        sunset = daily['sunset'][i].split('T')[1] if 'sunset' in daily else "--:--"
 
         text += (
             f"━━━━━━━━━━━━━━━━━━━\n"
@@ -139,8 +146,8 @@ async def morning_scheduler(session: aiohttp.ClientSession):
                             parse_mode="Markdown",
                             reply_markup=get_keyboard()
                         )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logging.error(f"Failed to send morning weather to {user_id}: {e}")
             await asyncio.sleep(60)
         await asyncio.sleep(30)
 
@@ -183,55 +190,67 @@ async def search_place(message: Message, session: aiohttp.ClientSession):
             short_title = item['display_name'][:35] + "..."
             lat = round(float(item['lat']), 4)
             lon = round(float(item['lon']), 4)
-            # Зашиваем координаты прямо в callback_data
             cb_data = f"geo:{lat}:{lon}"
             buttons.append([InlineKeyboardButton(text=short_title, callback_data=cb_data)])
         
         kb = InlineKeyboardMarkup(inline_keyboard=buttons)
         await message.answer("🔎 Выбери точное место (я его запомню):", reply_markup=kb)
 
-    except Exception:
+    except Exception as e:
+        logging.error(f"Search place error: {e}")
         await message.answer("⚠️ Ошибка поиска.")
 
-@dp.callback_query(lambda c: c.data.startswith('geo:'))
+@dp.callback_query(lambda c: c.data and c.data.startswith('geo:'))
 async def process_place_choice(callback: CallbackQuery, session: aiohttp.ClientSession):
-    _, lat, lon = callback.data.split(':')
-    user_id = str(callback.from_user.id)
-    
-    headers = {"User-Agent": "TelegramWeatherBot/1.0"}
-    rev_url = f"https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lon}&format=json"
-    
     try:
-        async with session.get(rev_url, headers=headers) as resp:
-            rev_res = await resp.json()
-        display_name = rev_res.get('display_name', 'Выбранная локация')
-    except Exception:
-        display_name = 'Выбранная локация'
+        parts = callback.data.split(':')
+        lat, lon = parts[1], parts[2]
+        user_id = str(callback.from_user.id)
+        
+        headers = {"User-Agent": "TelegramWeatherBot/1.0"}
+        rev_url = f"https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lon}&format=json"
+        
+        display_name = f"Локация ({lat}, {lon})"
+        try:
+            async with session.get(rev_url, headers=headers) as resp:
+                if resp.status == 200:
+                    rev_res = await resp.json()
+                    display_name = rev_res.get('display_name', display_name)
+        except Exception as e:
+            logging.error(f"Reverse geocoding error: {e}")
 
-    users = load_users()
-    users[user_id] = {
-        "lat": lat, "lon": lon, 
-        "name": display_name, "subscribed": True
-    }
-    save_users(users)
+        users = load_users()
+        users[user_id] = {
+            "lat": lat, "lon": lon, 
+            "name": display_name, "subscribed": True
+        }
+        save_users(users)
 
-    report = await fetch_weather(session, lat, lon, display_name, days=1)
-    await callback.message.edit_text(f"✅ Локация сохранена!\n\n{report}", parse_mode="Markdown", reply_markup=get_keyboard())
-    await callback.answer()
+        report = await fetch_weather(session, lat, lon, display_name, days=1)
+        await callback.message.edit_text(f"✅ Локация сохранена!\n\n{report}", parse_mode="Markdown", reply_markup=get_keyboard())
+    except Exception as e:
+        logging.error(f"Callback place error: {e}")
+        await callback.answer("Произошла ошибка при сохранении локации.", show_alert=True)
+    finally:
+        await callback.answer()
 
-@dp.callback_query(lambda c: c.data.startswith('period_'))
+@dp.callback_query(lambda c: c.data and c.data.startswith('period_'))
 async def process_period_choice(callback: CallbackQuery, session: aiohttp.ClientSession):
-    days = int(callback.data.split('_')[1])
-    user_id = str(callback.from_user.id)
-    users = load_users()
-    
-    if user_id in users:
-        info = users[user_id]
-        report = await fetch_weather(session, info['lat'], info['lon'], info['name'], days=days)
-        await callback.message.edit_text(report, parse_mode="Markdown", reply_markup=get_keyboard())
-    else:
-        await callback.answer("Сначала напишите название вашей деревни или города!")
-    await callback.answer()
+    try:
+        days = int(callback.data.split('_')[1])
+        user_id = str(callback.from_user.id)
+        users = load_users()
+        
+        if user_id in users:
+            info = users[user_id]
+            report = await fetch_weather(session, info['lat'], info['lon'], info['name'], days=days)
+            await callback.message.edit_text(report, parse_mode="Markdown", reply_markup=get_keyboard())
+        else:
+            await callback.answer("Сначала напишите название вашей деревни или города!", show_alert=True)
+    except Exception as e:
+        logging.error(f"Period choice error: {e}")
+    finally:
+        await callback.answer()
 
 async def handle(request):
     return web.Response(text="Bot is running!")
@@ -254,4 +273,3 @@ async def main():
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     asyncio.run(main())
-
