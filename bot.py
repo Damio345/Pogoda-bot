@@ -74,14 +74,21 @@ async def fetch_weather(lat, lon, display_name, days=1):
         "timezone": "auto"
     }
     
-    headers = {"User-Agent": "WeatherAppBot/2.0 (mybot@domain.com)"}
+    headers = {"User-Agent": f"UniqueWeatherBot_{os.urandom(4).hex()}/1.0"}
     
     try:
         async with ClientSession() as session:
-            async with session.get(url, params=params, headers=headers, timeout=10) as resp:
-                if resp.status != 200:
-                    return f"⚠️ Ошибка сервера погоды (Код: {resp.status})."
-                data = await resp.json()
+            for attempt in range(3):
+                async with session.get(url, params=params, headers=headers, timeout=10) as resp:
+                    if resp.status == 429:
+                        await asyncio.sleep(1.5)
+                        continue
+                    if resp.status != 200:
+                        return f"⚠️ Ошибка сервера погоды (Код: {resp.status})."
+                    data = await resp.json()
+                    break
+            else:
+                return "⚠️ Сервер погоды перегружен (429). Подождите полминуты и нажмите кнопку заново."
 
         curr = data.get("current", {})
         daily = data.get("daily", {})
