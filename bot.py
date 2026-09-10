@@ -2,6 +2,7 @@ import asyncio
 import logging
 import json
 import os
+import urllib.parse
 from datetime import datetime
 from aiogram import Bot, Dispatcher
 from aiogram.filters import CommandStart
@@ -35,6 +36,12 @@ def save_users(data):
     except Exception as e:
         logging.error(f"Failed to save users: {e}")
 
+def clean_text(text):
+    """Удаляет спецсимволы Markdown, чтобы Telegram не выдавал ошибку"""
+    if not text:
+        return ""
+    return str(text).replace("_", "\\_").replace("*", "\\*").replace("`", "\\`").replace("[", "\\[")
+
 def get_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -45,13 +52,15 @@ def get_keyboard():
     ])
 
 async def fetch_weather(place_name, days=1):
-    url = f"https://wttr.in/{place_name}?format=j1&lang=ru"
+    # Кодируем название города для безопасной передачи в URL
+    encoded_place = urllib.parse.quote(place_name)
+    url = f"https://wttr.in/{encoded_place}?format=j1&lang=ru"
     
     try:
         async with ClientSession() as session:
             async with session.get(url, timeout=10) as resp:
                 if resp.status != 200:
-                    return f"⚠️ Не удалось найти погоду для '{place_name}'."
+                    return f"⚠️ Не удалось найти погоду для '{clean_text(place_name)}'."
                 data = await resp.json()
 
         curr = data.get("current_condition", [{}])[0]
@@ -60,7 +69,7 @@ async def fetch_weather(place_name, days=1):
         
         city = area.get("areaName", [{}])[0].get("value", place_name)
         country = area.get("country", [{}])[0].get("value", "")
-        display_name = f"{city}, {country}"
+        display_name = clean_text(f"{city}, {country}")
 
         if days == 1:
             today = weather_days[0] if weather_days else {}
@@ -72,7 +81,7 @@ async def fetch_weather(place_name, days=1):
                 f"━━━━━━━━━━━━━━━━━━━\n"
                 f"🌡 **Температура:** {curr.get('temp_C')}°C (ощущается как {curr.get('FeelsLikeC')}°C)\n"
                 f"📊 **Мин / Макс сегодня:** {today.get('mintempC')}°C ... {today.get('maxtempC')}°C\n"
-                f"☁️ **Состояние:** {desc}\n"
+                f"☁️ **Состояние:** {clean_text(desc)}\n"
                 f"💧 **Влажность:** {curr.get('humidity')}%\n"
                 f"💨 **Ветер:** {curr.get('windspeedKmph')} км/ч\n"
                 f"⏲ **Давление:** {round(float(curr.get('pressure', 0)) * 0.750063)} мм рт. ст.\n"
@@ -91,7 +100,7 @@ async def fetch_weather(place_name, days=1):
             text += (
                 f"━━━━━━━━━━━━━━━━━━━\n"
                 f"📅 **Дата:** {date_str}\n"
-                f"☁️ **Состояние:** {noon_desc}\n"
+                f"☁️ **Состояние:** {clean_text(noon_desc)}\n"
                 f"🌡 **Температура:** от {day_data.get('mintempC')}°C до {day_data.get('maxtempC')}°C\n"
                 f"☀️ **УФ-индекс:** {day_data.get('uvIndex')}\n"
                 f"🌅 **Восход:** {astronomy.get('sunrise', '--:--')} | 🌇 **Закат:** {astronomy.get('sunset', '--:--')}\n"
@@ -156,7 +165,6 @@ async def handle(request):
 async def main():
     logging.basicConfig(level=logging.INFO)
 
-    # Настройка расписания рассылки на 09:00 по Екатеринбургу (Asia/Yekaterinburg, UTC+5)
     scheduler = AsyncIOScheduler(timezone="Asia/Yekaterinburg")
     scheduler.add_job(send_daily_weather, 'cron', hour=9, minute=0)
     scheduler.start()
