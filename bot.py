@@ -3,9 +3,17 @@ import logging
 import json
 import os
 import urllib.parse
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.types import (
+    Message, 
+    InlineKeyboardMarkup, 
+    InlineKeyboardButton, 
+    CallbackQuery,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardRemove
+)
 from aiohttp import ClientSession, web
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -18,7 +26,6 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 USERS_FILE = "user_settings.json"
-TEMP_PLACES = {}  # Временное хранение вариантов поиска для обхода лимита 64 байт Telegram
 
 def load_users():
     if os.path.exists(USERS_FILE):
@@ -36,44 +43,28 @@ def save_users(data):
     except Exception as e:
         logging.error(f"Failed to save users: {e}")
 
+# Клавиатура для выбора периода
 def get_period_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="Сегодня 📅", callback_data="period_1"),
             InlineKeyboardButton(text="На 3 дня 🗓", callback_data="period_3"),
             InlineKeyboardButton(text="На неделю 📊", callback_data="period_7")
+        ],
+        [
+            InlineKeyboardButton(text="📍 Обновить GPS", callback_data="req_gps")
         ]
     ])
 
-async def search_places(query):
-    """Ищет варианты населенных пунктов через Open-Meteo Geocoding"""
-    encoded = urllib.parse.quote(query)
-    url = f"https://geocoding-api.open-meteo.com/v1/search?name={encoded}&count=5&language=ru&format=json"
-    
-    try:
-        async with ClientSession() as session:
-            async with session.get(url, timeout=10) as resp:
-                if resp.status == 200:
-                    data = await resp.json(content_type=None)
-                    results = data.get("results", [])
-                    places = []
-                    for idx, item in enumerate(results):
-                        name = item.get("name", "")
-                        admin = item.get("admin1", "")
-                        country = item.get("country", "")
-                        
-                        full_name = name
-                        if admin and admin != name:
-                            full_name += f", {admin}"
-                        if country:
-                            full_name += f" ({country})"
-                            
-                        lat, lon = item.get("latitude"), item.get("longitude")
-                        places.append({"id": str(idx), "name": full_name, "query": f"{lat},{lon}"})
-                    return places
-    except Exception as e:
-        logging.error(f"Geocoding error: {e}")
-    return []
+# Главная кнопка отправки GPS-координат
+def get_gps_keyboard():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📍 Отправить точную геолокацию (GPS)", request_location=True)]
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True
+    )
 
 async def fetch_weather(query, days=1):
     encoded = urllib.parse.quote(query)
@@ -156,63 +147,43 @@ async def send_daily_weather():
                 except Exception as e:
                     logging.error(f"Failed send daily weather to {user_id}: {e}")
 
+# Команда /start и запуск
 @dp.message(CommandStart())
 async def start_cmd(message: Message):
-    await message.answer("👋 Напиши название населенного пункта, и я помогу выбрать точный вариант!")
+    await message.answer(
+        "👋 Привет! Нажми на кнопку ниже, чтобы отправить свои точные GPS-координаты.",
+        reply_markup=get_gps_keyboard()
+    )
 
-@dp.message()
-async def search_place_handler(message: Message):
+# Обработка полученных GPS координат
+@dp.message(F.location)
+async def handle_location(message: Message):
     user_id = str(message.from_user.id)
-    query = message.text.strip()
-    places = await search_places(query)
+    lat = message.location.latitude
+    lon = message.location.longitude
+    gps_query = f"{lat},{lon}"
 
-    if not places:
-        users = load_users()
-        users[user_id] = {"place": query, "subscribed": True}
-        save_users(users)
-        report = await fetch_weather(query, days=1)
-        await message.answer(f"✅ Локация сохранена!\n\n{report}", reply_markup=get_period_keyboard())
-        return
+    # Сохраняем точные координаты
+    users = load_users()
+    users[user_id] = {"place": gps_query, "subscribed": True}
+    save_users(users)
 
-    if len(places) == 1:
-        p = places[0]
-        users = load_users()
-        users[user_id] = {"place": p["query"], "subscribed": True}
-        save_users(users)
-        report = await fetch_weather(p["query"], days=1)
-        await message.answer(f"✅ Сохранено: {p['name']}\n\n{report}", reply_markup=get_period_keyboard())
-    else:
-        # Сохраняем варианты в словаре TEMP_PLACES для пользователя
-        TEMP_PLACES[user_id] = {p["id"]: p for p in places}
-        buttons = []
-        for p in places:
-            cb_data = f"loc|{p['id']}"
-            buttons.append([InlineKeyboardButton(text=p['name'], callback_data=cb_data)])
-            
-        kb = InlineKeyboardMarkup(inline_keyboard=buttons)
-        await message.answer("🔍 Найдено несколько вариантов. Выберите ваш населенный пункт:", reply_markup=kb)
+    # Убираем кнопку геолокации и отправляем погоду
+    await message.answer("📍 Точные координаты получены!", reply_markup=ReplyKeyboardRemove())
+    report = await fetch_weather(gps_query, days=1)
+    await message.answer(f"✅ Локация обновлена!\n\n{report}", reply_markup=get_period_keyboard())
 
-@dp.callback_query(lambda c: c.data and c.data.startswith('loc|'))
-async def process_select_location(callback: CallbackQuery):
-    await callback.answer("Сохраняем...")
-    user_id = str(callback.from_user.id)
-    place_id = callback.data.split('|')[1]
-    
-    user_temp = TEMP_PLACES.get(user_id, {})
-    selected_place = user_temp.get(place_id)
+# Кнопка «Обновить GPS» в инлайн-меню
+@dp.callback_query(F.data == "req_gps")
+async def request_gps_callback(callback: CallbackQuery):
+    await callback.answer()
+    await callback.message.answer(
+        "Нажми кнопку ниже для отправки новых GPS-координат:",
+        reply_markup=get_gps_keyboard()
+    )
 
-    if selected_place:
-        loc_query = selected_place["query"]
-        users = load_users()
-        users[user_id] = {"place": loc_query, "subscribed": True}
-        save_users(users)
-
-        report = await fetch_weather(loc_query, days=1)
-        await callback.message.edit_text(f"✅ Сохранено: {selected_place['name']}\n\n{report}", reply_markup=get_period_keyboard())
-    else:
-        await callback.message.answer("Сессия выбора истекла. Напишите название города еще раз!")
-
-@dp.callback_query(lambda c: c.data and c.data.startswith('period_'))
+# Обработка выбора периода (1, 3, 7 дней)
+@dp.callback_query(F.data.startswith('period_'))
 async def process_period_choice(callback: CallbackQuery):
     await callback.answer("Загрузка...")
     try:
@@ -225,7 +196,10 @@ async def process_period_choice(callback: CallbackQuery):
             report = await fetch_weather(place_query, days=days)
             await callback.message.edit_text(report, reply_markup=get_period_keyboard())
         else:
-            await callback.message.answer("Сначала напишите название города!")
+            await callback.message.answer(
+                "Сначала отправь свои GPS-координаты!",
+                reply_markup=get_gps_keyboard()
+            )
     except Exception as e:
         logging.error(f"Period choice error: {e}")
 
